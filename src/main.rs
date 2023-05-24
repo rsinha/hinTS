@@ -25,44 +25,82 @@ type F = ark_bls12_377::Fr;
 type G1 = <Curve as Pairing>::G1Affine;
 type G2 = <Curve as Pairing>::G2Affine;
 
+/// hinTS proof structure
 struct Proof {
+    /// aggregate public key (aPK in the paper)
     agg_pk: G1,
+    /// aggregate weight (w in the paper)
     agg_weight: F,
 
-    r: F,
+    /// commitment to the bitmap polynomial ([B(τ)]_1 in the paper)
+    b_of_tau_com: G1,
+    /// commitment to the Q_x polynomial ([Q_x(τ)]_1 in the paper)
+    qx_of_tau_com: G1,
+    /// commitment to the Q_z polynomial ([Q_z(τ)]_1 in the paper)
+    qz_of_tau_com: G1,
+    /// commitment to the ParSum polynomial ([ParSum(τ)]_1 in the paper)
+    parsum_of_tau_com: G1,
 
-    merged_proof: G1,
+    /// commitment to the ParSum well-formedness quotient polynomial
+    q1_of_tau_com: G1,
+    /// commitment to the ParSum check at omega^{n-1} quotient polynomial
+    q3_of_tau_com: G1,
+    /// commitment to the bitmap well-formedness quotient polynomial
+    q2_of_tau_com: G1,
+    /// commitment to the bitmap check at omega^{n-1} quotient polynomial
+    q4_of_tau_com: G1,
 
-    psw_of_r: F,
+    /// merged opening proof for all openings at x = r
+    opening_proof_r: G1,
+    /// proof for the ParSum opening at x = r / ω
+    opening_proof_r_div_ω: G1,
 
-    psw_of_r_div_ω: F,
-    psw_of_r_div_ω_proof: G1,
+    /// polynomial evaluation of ParSum(x) at x = r
+    parsum_of_r: F,
+    /// polynomial evaluation of ParSum(x) at x = r / ω
+    parsum_of_r_div_ω: F,
+    /// polynomial evaluation of W(x) at x = r
     w_of_r: F,
+    /// polynomial evaluation of bitmap B(x) at x = r
     b_of_r: F,
-    psw_wff_q_of_r: F,
-    psw_check_q_of_r: F,
-    b_wff_q_of_r: F,
-    b_check_q_of_r: F,
+    /// polynomial evaluation of quotient Q1(x) at x = r
+    q1_of_r: F,
+    /// polynomial evaluation of quotient Q3(x) at x = r
+    q3_of_r: F,
+    /// polynomial evaluation of quotient Q2(x) at x = r
+    q2_of_r: F,
+    /// polynomial evaluation of quotient Q4(x) at x = r
+    q4_of_r: F,
 
-    psw_of_x_com: G1,
-    b_of_x_com: G1,
-    psw_wff_q_of_x_com: G1,
-    psw_check_q_of_x_com: G1,
-    b_wff_q_of_x_com: G1,
-    b_check_q_of_x_com: G1,
-
-    sk_q1_com: G1,
-    sk_q2_com: G1,
+    /// TODO: v = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ)
+    /// TODO: r = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q)
+    r: F
 }
 
-struct ProverPreprocessing {
-    n: usize, //size of the committee as a power of 2
-    pks: Vec<G1>, //g^sk_i for each party i
-    q1_coms : Vec<G1>, //preprocessed contributions for pssk_q1
-    q2_coms : Vec<G1>, //preprocessed contributions for pssk_q2
+/// Hint contains all material output by a party during the setup phase
+struct Hint {
+    
 }
 
-struct VerifierPreprocessing {
+/// AggregationKey contains all material needed by Prover to produce a hinTS proof
+struct AggregationKey {
+    /// number of parties plus one (must be a power of 2)
+    n: usize,
+    /// weights has all parties' weights, where weights[i] is party i's weight
+    weights: Vec<F>,
+    /// pks contains all parties' public keys, where pks[i] is g^sk_i
+    pks: Vec<G1>,
+    /// qz_terms contains pre-processed hints for the Q_z polynomial.
+    /// qz_terms[i] has the following form:
+    /// [sk_i * (L_i(\tau)^2 - L_i(\tau)) / Z(\tau) + 
+    /// \Sigma_{j} sk_j * (L_i(\tau) L_j(\tau)) / Z(\tau)]_1
+    qz_terms : Vec<G1>,
+    /// qx_terms contains pre-processed hints for the Q_x polynomial.
+    /// qx_terms[i] has the form [ sk_i * (L_i(\tau) - L_i(0)) / x ]_1
+    qx_terms : Vec<G1>,
+}
+
+struct VerificationKey {
     n: usize, //size of the committee as a power of 2
     g_0: G1, //first element from the KZG SRS over G1
     h_0: G2, //first element from the KZG SRS over G2
@@ -105,7 +143,7 @@ fn prepare_cache(n: usize) -> Cache {
 } 
 
 fn main() {
-    let n = 64;
+    let n = 32;
     println!("n = {}", n);
 
     //contains commonly used objects such as lagrange polynomials
@@ -131,7 +169,7 @@ fn main() {
     let bitmap = sample_bitmap(n - 1, 0.9);
 
     let start = Instant::now();
-    let π = prove(&params, &pp, &cache, &weights, &bitmap);
+    let π = prove(&params, &pp, &cache, &bitmap);
     let duration = start.elapsed();
     println!("Time elapsed in prover is: {:?}", duration);
     
@@ -145,11 +183,11 @@ fn main() {
 fn setup(
     n: usize,
     params: &UniversalParams<Curve>,
-    weights: &Vec<F>,
+    w: &Vec<F>,
     sk: &Vec<F>
-) -> (VerifierPreprocessing, ProverPreprocessing)
+) -> (VerificationKey, AggregationKey)
 {
-    let mut weights = weights.clone();
+    let mut weights = w.clone();
     let mut sk = sk.clone();
 
     //last element must be 0
@@ -190,7 +228,7 @@ fn setup(
     let x_monomial = utils::compute_x_monomial();
     let l_n_minus_1_of_x = utils::lagrange_poly(n, n-1);
 
-    let vp = VerifierPreprocessing {
+    let vp = VerificationKey {
         n: n,
         g_0: params.powers_of_g[0].clone(),
         h_0: params.powers_of_h[0].clone(),
@@ -203,11 +241,12 @@ fn setup(
         x_monomial_com: KZG::commit_g2(&params, &x_monomial).unwrap(),
     };
 
-    let pp = ProverPreprocessing {
+    let pp = AggregationKey {
         n: n,
+        weights: w.clone(),
         pks: pks,
-        q1_coms: preprocess_q1_contributions(&q1_contributions),
-        q2_coms: q2_contributions,
+        qz_terms: preprocess_q1_contributions(&q1_contributions),
+        qx_terms: q2_contributions,
     };
 
     (vp, pp)
@@ -217,15 +256,14 @@ fn setup(
 
 fn prove(
     params: &UniversalParams<Curve>,
-    pp: &ProverPreprocessing,
+    ak: &AggregationKey,
     cache: &Cache,
-    weights: &Vec<F>, 
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
-    let n = pp.n;
+    let n = ak.n;
 
     //adjust the weights and bitmap polynomials
-    let mut weights = weights.clone();
+    let mut weights = ak.weights.clone();
     //compute sum of weights of active signers
     let total_active_weight = bitmap
         .iter()
@@ -273,9 +311,9 @@ fn prove(
         &b_of_x.clone().sub(&utils::compute_constant_poly(&F::from(1))));
     let b_check_q_of_x = t_of_x.div(&z_of_x);
 
-    let sk_q1_com = filter_and_add(&params, &pp.q1_coms, &bitmap);
-    let sk_q2_com = filter_and_add(&params, &pp.q2_coms, &bitmap);
-    let agg_pk = compute_apk(&pp, &bitmap, &cache);
+    let sk_q1_com = filter_and_add(&params, &ak.qz_terms, &bitmap);
+    let sk_q2_com = filter_and_add(&params, &ak.qx_terms, &bitmap);
+    let agg_pk = compute_apk(&ak, &bitmap, &cache);
 
     let psw_of_r_proof = KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap();
     let w_of_r_proof = KZG::compute_opening_proof(&params, &w_of_x, &r).unwrap();
@@ -299,33 +337,33 @@ fn prove(
 
         r,
         
-        psw_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
-        psw_of_r_div_ω_proof: KZG::compute_opening_proof(&params, &psw_of_x, &r_div_ω).unwrap(),
+        parsum_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
+        opening_proof_r_div_ω: KZG::compute_opening_proof(&params, &psw_of_x, &r_div_ω).unwrap(),
 
-        psw_of_r: psw_of_x.evaluate(&r),
+        parsum_of_r: psw_of_x.evaluate(&r),
         w_of_r: w_of_x.evaluate(&r),
         b_of_r: b_of_x.evaluate(&r),
-        psw_wff_q_of_r: psw_wff_q_of_x.evaluate(&r),
-        psw_check_q_of_r: psw_check_q_of_x.evaluate(&r),
-        b_wff_q_of_r: b_wff_q_of_x.evaluate(&r),
-        b_check_q_of_r: b_check_q_of_x.evaluate(&r),
+        q1_of_r: psw_wff_q_of_x.evaluate(&r),
+        q3_of_r: psw_check_q_of_x.evaluate(&r),
+        q2_of_r: b_wff_q_of_x.evaluate(&r),
+        q4_of_r: b_check_q_of_x.evaluate(&r),
         
-        merged_proof: merged_proof.into(),
+        opening_proof_r: merged_proof.into(),
 
-        psw_of_x_com: KZG::commit_g1(&params, &psw_of_x).unwrap(),
-        b_of_x_com: KZG::commit_g1(&params, &b_of_x).unwrap(),
-        psw_wff_q_of_x_com: KZG::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
-        psw_check_q_of_x_com: KZG::commit_g1(&params, &psw_check_q_of_x).unwrap(),
-        b_wff_q_of_x_com: KZG::commit_g1(&params, &b_wff_q_of_x).unwrap(),
-        b_check_q_of_x_com: KZG::commit_g1(&params, &b_check_q_of_x).unwrap(),
+        parsum_of_tau_com: KZG::commit_g1(&params, &psw_of_x).unwrap(),
+        b_of_tau_com: KZG::commit_g1(&params, &b_of_x).unwrap(),
+        q1_of_tau_com: KZG::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
+        q3_of_tau_com: KZG::commit_g1(&params, &psw_check_q_of_x).unwrap(),
+        q2_of_tau_com: KZG::commit_g1(&params, &b_wff_q_of_x).unwrap(),
+        q4_of_tau_com: KZG::commit_g1(&params, &b_check_q_of_x).unwrap(),
 
-        sk_q1_com: sk_q1_com,
-        sk_q2_com: sk_q2_com,
+        qz_of_tau_com: sk_q1_com,
+        qx_of_tau_com: sk_q2_com,
     }
 }
 
 fn verify_opening(
-    vp: &VerifierPreprocessing, 
+    vp: &VerificationKey, 
     commitment: &G1,
     point: &F, 
     evaluation: &F,
@@ -338,19 +376,19 @@ fn verify_opening(
     assert_eq!(lhs, rhs);
 }
 
-fn verify_openings(vp: &VerifierPreprocessing, π: &Proof) {
+fn verify_openings(vp: &VerificationKey, π: &Proof) {
     //adjust the w_of_x_com
     let adjustment = F::from(0) - π.agg_weight;
     let adjustment_com = vp.l_n_minus_1_of_x_com.mul(adjustment);
     let w_of_x_com: G1 = (vp.w_of_x_com + adjustment_com).into();
 
-    let psw_of_r_argument = π.psw_of_x_com - vp.g_0.clone().mul(π.psw_of_r).into_affine();
+    let psw_of_r_argument = π.parsum_of_tau_com - vp.g_0.clone().mul(π.parsum_of_r).into_affine();
     let w_of_r_argument = w_of_x_com - vp.g_0.clone().mul(π.w_of_r).into_affine();
-    let b_of_r_argument = π.b_of_x_com - vp.g_0.clone().mul(π.b_of_r).into_affine();
-    let psw_wff_q_of_r_argument = π.psw_wff_q_of_x_com - vp.g_0.clone().mul(π.psw_wff_q_of_r).into_affine();
-    let psw_check_q_of_r_argument = π.psw_check_q_of_x_com - vp.g_0.clone().mul(π.psw_check_q_of_r).into_affine();
-    let b_wff_q_of_r_argument = π.b_wff_q_of_x_com - vp.g_0.clone().mul(π.b_wff_q_of_r).into_affine();
-    let b_check_q_of_r_argument = π.b_check_q_of_x_com - vp.g_0.clone().mul(π.b_check_q_of_r).into_affine();
+    let b_of_r_argument = π.b_of_tau_com - vp.g_0.clone().mul(π.b_of_r).into_affine();
+    let psw_wff_q_of_r_argument = π.q1_of_tau_com - vp.g_0.clone().mul(π.q1_of_r).into_affine();
+    let psw_check_q_of_r_argument = π.q3_of_tau_com - vp.g_0.clone().mul(π.q3_of_r).into_affine();
+    let b_wff_q_of_r_argument = π.q2_of_tau_com - vp.g_0.clone().mul(π.q2_of_r).into_affine();
+    let b_check_q_of_r_argument = π.q4_of_tau_com - vp.g_0.clone().mul(π.q4_of_r).into_affine();
 
     let merged_argument: G1 = (psw_of_r_argument
         + w_of_r_argument.mul(π.r.pow([1]))
@@ -364,17 +402,17 @@ fn verify_openings(vp: &VerifierPreprocessing, π: &Proof) {
         merged_argument, 
         vp.h_0);
     let rhs = <Curve as Pairing>::pairing(
-        π.merged_proof, 
+        π.opening_proof_r, 
         vp.h_1 - vp.h_0.clone().mul(π.r).into_affine());
     assert_eq!(lhs, rhs);
 
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
     let r_div_ω: F = π.r / ω;
-    verify_opening(vp, &π.psw_of_x_com, &r_div_ω, &π.psw_of_r_div_ω, &π.psw_of_r_div_ω_proof);
+    verify_opening(vp, &π.parsum_of_tau_com, &r_div_ω, &π.parsum_of_r_div_ω, &π.opening_proof_r_div_ω);
 }
 
-fn verify(vp: &VerifierPreprocessing, π: &Proof) {
+fn verify(vp: &VerificationKey, π: &Proof) {
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
 
@@ -389,9 +427,9 @@ fn verify(vp: &VerifierPreprocessing, π: &Proof) {
     let l_n_minus_1_of_r = (ω_pow_n_minus_1 / F::from(n)) * (vanishing_of_r / (π.r - ω_pow_n_minus_1));
 
     //assert polynomial identity for the secret part
-    let lhs = <Curve as Pairing>::pairing(&π.b_of_x_com, &vp.sk_of_x_com);
-    let x1 = <Curve as Pairing>::pairing(&π.sk_q1_com, &vp.vanishing_com);
-    let x2 = <Curve as Pairing>::pairing(&π.sk_q2_com, &vp.x_monomial_com);
+    let lhs = <Curve as Pairing>::pairing(&π.b_of_tau_com, &vp.sk_of_x_com);
+    let x1 = <Curve as Pairing>::pairing(&π.qz_of_tau_com, &vp.vanishing_com);
+    let x2 = <Curve as Pairing>::pairing(&π.qx_of_tau_com, &vp.x_monomial_com);
     let x3 = <Curve as Pairing>::pairing(&π.agg_pk, &vp.h_0);
     let rhs = x1.add(x2).add(x3);
     assert_eq!(lhs, rhs);
@@ -399,35 +437,35 @@ fn verify(vp: &VerifierPreprocessing, π: &Proof) {
     //assert checks on the public part
 
     //ParSumW(r) − ParSumW(r/ω) − W(r) · b(r) = Q(r) · (r^n − 1)
-    let lhs = π.psw_of_r - π.psw_of_r_div_ω - π.w_of_r * π.b_of_r;
-    let rhs = π.psw_wff_q_of_r * vanishing_of_r;
+    let lhs = π.parsum_of_r - π.parsum_of_r_div_ω - π.w_of_r * π.b_of_r;
+    let rhs = π.q1_of_r * vanishing_of_r;
     assert_eq!(lhs, rhs);
 
     //Ln−1(X) · ParSumW(X) = Z(X) · Q2(X)
     //TODO: compute l_n_minus_1_of_r in verifier -- dont put it in the proof.
-    let lhs = l_n_minus_1_of_r * π.psw_of_r;
-    let rhs = vanishing_of_r * π.psw_check_q_of_r;
+    let lhs = l_n_minus_1_of_r * π.parsum_of_r;
+    let rhs = vanishing_of_r * π.q3_of_r;
     assert_eq!(lhs, rhs);
 
     //b(r) * b(r) - b(r) = Q(r) · (r^n − 1)
     let lhs = π.b_of_r * π.b_of_r - π.b_of_r;
-    let rhs = π.b_wff_q_of_r * vanishing_of_r;
+    let rhs = π.q2_of_r * vanishing_of_r;
     assert_eq!(lhs, rhs);
 
     //Ln−1(X) · (b(X) − 1) = Z(X) · Q4(X)
     let lhs = l_n_minus_1_of_r * (π.b_of_r - F::from(1));
-    let rhs = vanishing_of_r * π.b_check_q_of_r;
+    let rhs = vanishing_of_r * π.q4_of_r;
     assert_eq!(lhs, rhs);
 
 }
 
 
 fn compute_apk(
-    pp: &ProverPreprocessing, 
+    pp: &AggregationKey, 
     bitmap: &Vec<F>,
     cache: &Cache) -> G1 {
     let n = bitmap.len();
-    let mut exponents = vec![];
+    let mut exponents: Vec<F> = vec![];
     for i in 0..n {
         //let l_i_of_x = utils::lagrange_poly(n, i);
         let l_i_of_x = cache.lagrange_polynomials[i].clone();
@@ -447,13 +485,17 @@ fn preprocess_q1_contributions(
     let mut q1_coms = vec![];
 
     for i in 0..n {
+        // extract party i's hints, from which we extract the term for i.
         let mut party_i_q1_com = q1_contributions[i][i].clone();
         for j in 0..n {
             if i != j {
+                // extract party j's hints, from which we extract cross-term for party i
                 let party_j_contribution = q1_contributions[j][i].clone();
                 party_i_q1_com = party_i_q1_com.add(party_j_contribution).into();
             }
         }
+        // the aggregation key contains a single term that 
+        // is a product of all cross-terms and the ith term
         q1_coms.push(party_i_q1_com);
     }
     q1_coms
