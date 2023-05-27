@@ -36,6 +36,8 @@ struct Proof {
     b_of_tau_com: G1,
     /// commitment to the Q_x polynomial ([Q_x(τ)]_1 in the paper)
     qx_of_tau_com: G1,
+    /// commitment to the Q_x polynomial ([Q_x(τ) . τ ]_1 in the paper)
+    qx_of_tau_mul_tau_com: G1,
     /// commitment to the Q_z polynomial ([Q_z(τ)]_1 in the paper)
     qz_of_tau_com: G1,
     /// commitment to the ParSum polynomial ([ParSum(τ)]_1 in the paper)
@@ -74,12 +76,28 @@ struct Proof {
 
     /// TODO: v = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ)
     /// TODO: r = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q)
-    r: F
+    r: F,
+    //v: F,
 }
 
 /// Hint contains all material output by a party during the setup phase
+#[allow(dead_code)]
 struct Hint {
-    
+    /// index in the address book
+    i: usize,
+    /// public key pk = [sk]_1
+    pk_i: G1,
+    /// [ sk_i L_i(τ) ]_1
+    sk_i_l_i_of_tau_com_1: G1,
+    /// [ sk_i L_i(τ) ]_2
+    sk_i_l_i_of_tau_com_2: G2,
+    /// qz_i_terms[i] = [ sk_i * ((L_i^2(τ) - L_i(τ)) / Z(τ)) ]_1
+    /// \forall j != i, qz_i_terms[j] = [ sk_i * (L_i(τ) * L_j(τ) / Z(τ)) ]_1
+    qz_i_terms: Vec<G1>,
+    /// [ sk_i ((L_i(τ) - L_i(0)) / τ ]_1
+    qx_i_term: G1,
+    /// [ sk_i ((L_i(τ) - L_i(0))]_1
+    qx_i_term_mul_tau: G1,
 }
 
 /// AggregationKey contains all material needed by Prover to produce a hinTS proof
@@ -98,18 +116,30 @@ struct AggregationKey {
     /// qx_terms contains pre-processed hints for the Q_x polynomial.
     /// qx_terms[i] has the form [ sk_i * (L_i(\tau) - L_i(0)) / x ]_1
     qx_terms : Vec<G1>,
+    /// qx_mul_tau_terms contains pre-processed hints for the Q_x * x polynomial.
+    /// qx_mul_tau_terms[i] has the form [ sk_i * (L_i(\tau) - L_i(0)) ]_1
+    qx_mul_tau_terms : Vec<G1>,
 }
 
 struct VerificationKey {
-    n: usize, //size of the committee as a power of 2
-    g_0: G1, //first element from the KZG SRS over G1
-    h_0: G2, //first element from the KZG SRS over G2
-    h_1: G2, //2nd element from the KZG SRS over G2
-    l_n_minus_1_of_x_com: G1,
-    w_of_x_com: G1,
-    sk_of_x_com: G2, //commitment to the sigma_{i \in [N]} sk_i l_i(x) polynomial
-    vanishing_com: G2, //commitment to Z(x) = x^n - 1
-    x_monomial_com: G2 //commentment to f(x) = x
+    /// the universe has n - 1 parties (where n is a power of 2)
+    n: usize,
+    /// first G1 element from the KZG CRS (for zeroth power of tau)
+    g_0: G1,
+    /// first G2 element from the KZG CRS (for zeroth power of tau)
+    h_0: G2,
+    /// second G1 element from the KZG CRS (for first power of tau)
+    h_1: G2,
+    /// commitment to the L_{n-1} polynomial
+    l_n_minus_1_of_tau_com: G1,
+    /// commitment to the W polynomial
+    w_of_tau_com: G1,
+    /// commitment to the SK polynomial
+    sk_of_tau_com: G2,
+    /// commitment to the vanishing polynomial Z(x) = x^n - 1
+    z_of_tau_com: G2,
+    /// commitment to the f(x) = x, which equals [\tau]_2
+    tau_com: G2 //commentment to f(x) = x
 }
 
 struct Cache {
@@ -198,10 +228,11 @@ fn setup(
     let w_of_x_com = KZG::commit_g1(&params, &w_of_x).unwrap();
 
     //allocate space to collect setup material from all n-1 parties
-    let mut q1_contributions : Vec<Vec<G1>> = vec![];
-    let mut q2_contributions : Vec<G1> = vec![];
-    let mut pks : Vec<G1> = vec![];
-    let mut com_sks: Vec<G2> = vec![];
+    let mut qz_contributions : Vec<Vec<G1>> = vec![Default::default(); n];
+    let mut qx_contributions : Vec<G1> = vec![Default::default(); n];
+    let mut qx_mul_tau_contributions : Vec<G1> = vec![Default::default(); n];
+    let mut pks : Vec<G1> = vec![Default::default(); n];
+    let mut sk_l_of_tau_coms: Vec<G2> = vec![Default::default(); n];
     
     //collect the setup phase material from all parties
     let all_parties_setup = crossbeam::scope(|s| {
@@ -217,11 +248,12 @@ fn setup(
         threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>()
     }).unwrap();
 
-    for (pk_i, com_sk_l_i, q1_i, q2_i) in all_parties_setup {
-        q1_contributions.push(q1_i.clone());
-        q2_contributions.push(q2_i.clone());
-        pks.push(pk_i.clone());
-        com_sks.push(com_sk_l_i.clone());
+    for hint in all_parties_setup {
+        qz_contributions[hint.i] = hint.qz_i_terms.clone();
+        qx_contributions[hint.i] = hint.qx_i_term.clone();
+        qx_mul_tau_contributions[hint.i] = hint.qx_i_term_mul_tau.clone();
+        pks[hint.i] = hint.pk_i.clone();
+        sk_l_of_tau_coms[hint.i] = hint.sk_i_l_i_of_tau_com_2.clone();
     }
 
     let z_of_x = utils::compute_vanishing_poly(n);
@@ -233,20 +265,21 @@ fn setup(
         g_0: params.powers_of_g[0].clone(),
         h_0: params.powers_of_h[0].clone(),
         h_1: params.powers_of_h[1].clone(),
-        l_n_minus_1_of_x_com: KZG::commit_g1(&params, &l_n_minus_1_of_x).unwrap(),
-        w_of_x_com: w_of_x_com,
+        l_n_minus_1_of_tau_com: KZG::commit_g1(&params, &l_n_minus_1_of_x).unwrap(),
+        w_of_tau_com: w_of_x_com,
         // combine all sk_i l_i_of_x commitments to get commitment to sk(x)
-        sk_of_x_com: add_all_g2(&params, &com_sks),
-        vanishing_com: KZG::commit_g2(&params, &z_of_x).unwrap(),
-        x_monomial_com: KZG::commit_g2(&params, &x_monomial).unwrap(),
+        sk_of_tau_com: add_all_g2(&params, &sk_l_of_tau_coms),
+        z_of_tau_com: KZG::commit_g2(&params, &z_of_x).unwrap(),
+        tau_com: KZG::commit_g2(&params, &x_monomial).unwrap(),
     };
 
     let pp = AggregationKey {
         n: n,
         weights: w.clone(),
         pks: pks,
-        qz_terms: preprocess_q1_contributions(&q1_contributions),
-        qx_terms: q2_contributions,
+        qz_terms: preprocess_qz_contributions(&qz_contributions),
+        qx_terms: qx_contributions,
+        qx_mul_tau_terms: qx_mul_tau_contributions,
     };
 
     (vp, pp)
@@ -311,8 +344,9 @@ fn prove(
         &b_of_x.clone().sub(&utils::compute_constant_poly(&F::from(1))));
     let b_check_q_of_x = t_of_x.div(&z_of_x);
 
-    let sk_q1_com = filter_and_add(&params, &ak.qz_terms, &bitmap);
-    let sk_q2_com = filter_and_add(&params, &ak.qx_terms, &bitmap);
+    let qz_com = filter_and_add(&params, &ak.qz_terms, &bitmap);
+    let qx_com = filter_and_add(&params, &ak.qx_terms, &bitmap);
+    let qx_mul_tau_com = filter_and_add(&params, &ak.qx_mul_tau_terms, &bitmap);
     let agg_pk = compute_apk(&ak, &bitmap, &cache);
 
     let psw_of_r_proof = KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap();
@@ -357,8 +391,9 @@ fn prove(
         q2_of_tau_com: KZG::commit_g1(&params, &b_wff_q_of_x).unwrap(),
         q4_of_tau_com: KZG::commit_g1(&params, &b_check_q_of_x).unwrap(),
 
-        qz_of_tau_com: sk_q1_com,
-        qx_of_tau_com: sk_q2_com,
+        qz_of_tau_com: qz_com,
+        qx_of_tau_com: qx_com,
+        qx_of_tau_mul_tau_com: qx_mul_tau_com,
     }
 }
 
@@ -379,8 +414,8 @@ fn verify_opening(
 fn verify_openings(vp: &VerificationKey, π: &Proof) {
     //adjust the w_of_x_com
     let adjustment = F::from(0) - π.agg_weight;
-    let adjustment_com = vp.l_n_minus_1_of_x_com.mul(adjustment);
-    let w_of_x_com: G1 = (vp.w_of_x_com + adjustment_com).into();
+    let adjustment_com = vp.l_n_minus_1_of_tau_com.mul(adjustment);
+    let w_of_x_com: G1 = (vp.w_of_tau_com + adjustment_com).into();
 
     let psw_of_r_argument = π.parsum_of_tau_com - vp.g_0.clone().mul(π.parsum_of_r).into_affine();
     let w_of_r_argument = w_of_x_com - vp.g_0.clone().mul(π.w_of_r).into_affine();
@@ -409,16 +444,23 @@ fn verify_openings(vp: &VerificationKey, π: &Proof) {
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
     let r_div_ω: F = π.r / ω;
-    verify_opening(vp, &π.parsum_of_tau_com, &r_div_ω, &π.parsum_of_r_div_ω, &π.opening_proof_r_div_ω);
+    verify_opening(vp, 
+        &π.parsum_of_tau_com, 
+        &r_div_ω, 
+        &π.parsum_of_r_div_ω, 
+        &π.opening_proof_r_div_ω);
 }
 
 fn verify(vp: &VerificationKey, π: &Proof) {
+    // compute root of unity
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
 
+    // verify the polynomial openings at r and r / ω
     verify_openings(vp, π);
 
     let n: u64 = vp.n as u64;
+    // this takes logarithmic computation, but concretely efficient
     let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
 
     // compute L_i(r) using the relation L_i(x) = Z_V(x) / ( Z_V'(x) (x - ω^i) )
@@ -426,10 +468,10 @@ fn verify(vp: &VerificationKey, π: &Proof) {
     let ω_pow_n_minus_1 = ω.pow([n-1]);
     let l_n_minus_1_of_r = (ω_pow_n_minus_1 / F::from(n)) * (vanishing_of_r / (π.r - ω_pow_n_minus_1));
 
-    //assert polynomial identity for the secret part
-    let lhs = <Curve as Pairing>::pairing(&π.b_of_tau_com, &vp.sk_of_x_com);
-    let x1 = <Curve as Pairing>::pairing(&π.qz_of_tau_com, &vp.vanishing_com);
-    let x2 = <Curve as Pairing>::pairing(&π.qx_of_tau_com, &vp.x_monomial_com);
+    //assert polynomial identity B(x) SK(x) = ask + Q_z(x) Z(x) + Q_x(x) x
+    let lhs = <Curve as Pairing>::pairing(&π.b_of_tau_com, &vp.sk_of_tau_com);
+    let x1 = <Curve as Pairing>::pairing(&π.qz_of_tau_com, &vp.z_of_tau_com);
+    let x2 = <Curve as Pairing>::pairing(&π.qx_of_tau_com, &vp.tau_com);
     let x3 = <Curve as Pairing>::pairing(&π.agg_pk, &vp.h_0);
     let rhs = x1.add(x2).add(x3);
     assert_eq!(lhs, rhs);
@@ -457,6 +499,11 @@ fn verify(vp: &VerificationKey, π: &Proof) {
     let rhs = vanishing_of_r * π.q4_of_r;
     assert_eq!(lhs, rhs);
 
+    //run the degree check e([Qx(τ)]_1, [τ]_2) ?= e([Qx(τ)·τ]_1, [1]_2)
+    let lhs = <Curve as Pairing>::pairing(&π.qx_of_tau_com, &vp.h_1);
+    let rhs = <Curve as Pairing>::pairing(&π.qx_of_tau_mul_tau_com, &vp.h_0);
+    assert_eq!(lhs, rhs);
+
 }
 
 
@@ -478,7 +525,7 @@ fn compute_apk(
         ::msm(&pp.pks[..], &exponents).unwrap().into_affine()
 }
 
-fn preprocess_q1_contributions(
+fn preprocess_qz_contributions(
     q1_contributions: &Vec<Vec<G1>>
 ) -> Vec<G1> {
     let n = q1_contributions.len();
@@ -574,12 +621,12 @@ fn party_i_setup_material(
     params: &UniversalParams<Curve>,
     n: usize, 
     i: usize, 
-    sk_i: &F) -> (G1, G2, Vec<G1>, G1) {
+    sk_i: &F) -> Hint {
     //let us compute the q1 term
     let l_i_of_x = utils::lagrange_poly(n, i);
     let z_of_x = utils::compute_vanishing_poly(n);
 
-    let mut q1_material = vec![];
+    let mut qz_terms = vec![];
     //let us compute the cross terms of q1
     for j in 0..n {
         let num: DensePolynomial<F>;// = compute_constant_poly(&F::from(0));
@@ -589,32 +636,50 @@ fn party_i_setup_material(
             let l_j_of_x = utils::lagrange_poly(n, j);
             num = l_j_of_x.mul(&l_i_of_x);
         }
+
         let f = num.div(&z_of_x);
         let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
 
         let com = KZG::commit_g1(&params, &sk_times_f)
             .expect("commitment failed");
 
-        q1_material.push(com);
+        qz_terms.push(com);
     }
 
     let x_monomial = utils::compute_x_monomial();
     let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
     let l_i_of_0_poly = utils::compute_constant_poly(&l_i_of_0);
+
+    //numerator is l_i(x) - l_i(0)
     let num = l_i_of_x.sub(&l_i_of_0_poly);
+    //denominator is x
     let den = x_monomial.clone();
-    let f = num.div(&den);
-    let sk_times_f = utils::poly_eval_mult_c(&f, &sk_i);
-    let q2_com = KZG::commit_g1(&params, &sk_times_f).expect("commitment failed");
+    //qx_term = sk_i * (l_i(x) - l_i(0)) / x
+    let qx_term = utils::poly_eval_mult_c(&num.div(&den), &sk_i);
+    //qx_term_mul_tau = sk_i * (l_i(x) - l_i(0)) / x
+    let qx_term_mul_tau = utils::poly_eval_mult_c(&num, &sk_i);
+    //qx_term_com = [ sk_i * (l_i(τ) - l_i(0)) / τ ]_1
+    let qx_term_com = KZG::commit_g1(&params, &qx_term).expect("commitment failed");
+    //qx_term_mul_tau_com = [ sk_i * (l_i(τ) - l_i(0)) ]_1
+    let qx_term_mul_tau_com = KZG::commit_g1(&params, &qx_term_mul_tau).expect("commitment failed");
 
     //release my public key
     let sk_as_poly = utils::compute_constant_poly(&sk_i);
     let pk = KZG::commit_g1(&params, &sk_as_poly).expect("commitment failed");
 
     let sk_times_l_i_of_x = utils::poly_eval_mult_c(&l_i_of_x, &sk_i);
-    let com_sk_l_i = KZG::commit_g2(&params, &sk_times_l_i_of_x).expect("commitment failed");
+    let com_sk_l_i_g1 = KZG::commit_g1(&params, &sk_times_l_i_of_x).expect("commitment failed");
+    let com_sk_l_i_g2 = KZG::commit_g2(&params, &sk_times_l_i_of_x).expect("commitment failed");
 
-    (pk, com_sk_l_i, q1_material, q2_com)
+    Hint {
+        i: i,
+        pk_i: pk,
+        sk_i_l_i_of_tau_com_1: com_sk_l_i_g1,
+        sk_i_l_i_of_tau_com_2: com_sk_l_i_g2,
+        qz_i_terms: qz_terms,
+        qx_i_term: qx_term_com,
+        qx_i_term_mul_tau: qx_term_mul_tau_com,
+    }
 }
 
 
