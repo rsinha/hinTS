@@ -1,6 +1,9 @@
 use std::time::{Instant};
 
-use ark_ff::{Field, /* FftField */ };
+use ark_serialize::CanonicalSerialize;
+use sha2::{Digest, Sha256};
+use ark_ff::{Field, biginteger::BigInteger256};
+
 use ark_poly::{
     Polynomial,
     univariate::DensePolynomial, 
@@ -73,11 +76,6 @@ struct Proof {
     q2_of_r: F,
     /// polynomial evaluation of quotient Q4(x) at x = r
     q4_of_r: F,
-
-    /// TODO: v = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ)
-    /// TODO: r = RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q)
-    r: F,
-    //v: F,
 }
 
 /// Hint contains all material output by a party during the setup phase
@@ -192,20 +190,20 @@ fn main() {
 
     // -------------- perform universe setup ---------------
     //run universe setup
-    let (vp,pp) = setup(n, &params, &weights, &sk);
+    let (vk, ak) = setup(n, &params, &weights, &sk);
 
     // -------------- sample proof specific values ---------------
     //samples n-1 random bits
     let bitmap = sample_bitmap(n - 1, 0.9);
 
     let start = Instant::now();
-    let π = prove(&params, &pp, &cache, &bitmap);
+    let π = prove(&params, &ak, &vk, &cache, &bitmap);
     let duration = start.elapsed();
     println!("Time elapsed in prover is: {:?}", duration);
     
 
     let start = Instant::now();
-    verify(&vp, &π);
+    verify(&vk, &π);
     let duration = start.elapsed();
     println!("Time elapsed in verifier is: {:?}", duration);
 }
@@ -286,10 +284,55 @@ fn setup(
 
 }
 
+//RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q1, Q2, Q3, Q4)
+fn random_oracle(
+    sk_com: G2,
+    w_com: G1,
+    b_com: G1,
+    parsum_com: G1,
+    qx_com: G1,
+    qz_com: G1,
+    qx_mul_x_com: G1,
+    q1_com: G1,
+    q2_com: G1,
+    q3_com: G1,
+    q4_com: G1,
+) -> F {
+
+    let mut serialized_data = Vec::new();
+    sk_com.serialize_compressed(&mut serialized_data).unwrap();
+    w_com.serialize_compressed(&mut serialized_data).unwrap();
+    b_com.serialize_compressed(&mut serialized_data).unwrap();
+    parsum_com.serialize_compressed(&mut serialized_data).unwrap();
+    qx_com.serialize_compressed(&mut serialized_data).unwrap();
+    qz_com.serialize_compressed(&mut serialized_data).unwrap();
+    qx_mul_x_com.serialize_compressed(&mut serialized_data).unwrap();
+    q1_com.serialize_compressed(&mut serialized_data).unwrap();
+    q2_com.serialize_compressed(&mut serialized_data).unwrap();
+    q3_com.serialize_compressed(&mut serialized_data).unwrap();
+    q4_com.serialize_compressed(&mut serialized_data).unwrap();
+
+    let mut hash_result = Sha256::digest(serialized_data.as_slice());
+    hash_result[31] = 0u8; //this makes sure we get a number below modulus
+    let hash_bytes = hash_result.as_slice();
+
+    let mut hash_values: [u64; 4] = [0; 4];
+    hash_values[0] = u64::from_le_bytes(hash_bytes[0..8].try_into().unwrap());
+    hash_values[1] = u64::from_le_bytes(hash_bytes[8..16].try_into().unwrap());
+    hash_values[2] = u64::from_le_bytes(hash_bytes[16..24].try_into().unwrap());
+    hash_values[3] = u64::from_le_bytes(hash_bytes[24..32].try_into().unwrap());
+    //hash_values[3] = u64::from(0u64);
+
+    let bi = BigInteger256::new(hash_values);
+
+    //let input: [u8; 32] = [0u8; 32];
+    F::try_from(bi).unwrap()
+}
 
 fn prove(
     params: &UniversalParams<Curve>,
     ak: &AggregationKey,
+    vk: &VerificationKey,
     cache: &Cache,
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
@@ -309,13 +352,9 @@ fn prove(
     //bitmap's last element must be 1 for our scheme
     bitmap.push(F::from(1));
 
-    let mut rng = test_rng();
-    let r = F::rand(&mut rng);
-
     //compute all the scalars we will need in the prover
     let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
     let ω: F = domain.group_gen;
-    let r_div_ω: F = r / ω;
     let ω_inv: F = F::from(1) / ω;
 
     //compute all the polynomials we will need in the prover
@@ -349,6 +388,29 @@ fn prove(
     let qx_mul_tau_com = filter_and_add(&params, &ak.qx_mul_tau_terms, &bitmap);
     let agg_pk = compute_apk(&ak, &bitmap, &cache);
 
+    let parsum_of_tau_com = KZG::commit_g1(&params, &psw_of_x).unwrap();
+    let b_of_tau_com = KZG::commit_g1(&params, &b_of_x).unwrap();
+    let q1_of_tau_com = KZG::commit_g1(&params, &psw_wff_q_of_x).unwrap();
+    let q2_of_tau_com = KZG::commit_g1(&params, &b_wff_q_of_x).unwrap();
+    let q3_of_tau_com = KZG::commit_g1(&params, &psw_check_q_of_x).unwrap();
+    let q4_of_tau_com = KZG::commit_g1(&params, &b_check_q_of_x).unwrap();
+
+    // RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q1, Q2, Q3, Q4)
+    let r = random_oracle(
+        vk.sk_of_tau_com, 
+        vk.w_of_tau_com,
+        b_of_tau_com,
+        parsum_of_tau_com,
+        qx_com,
+        qz_com,
+        qx_mul_tau_com,
+        q1_of_tau_com,
+        q2_of_tau_com,
+        q3_of_tau_com,
+        q4_of_tau_com
+    );
+    let r_div_ω: F = r / ω;
+
     let psw_of_r_proof = KZG::compute_opening_proof(&params, &psw_of_x, &r).unwrap();
     let w_of_r_proof = KZG::compute_opening_proof(&params, &w_of_x, &r).unwrap();
     let b_of_r_proof = KZG::compute_opening_proof(&params, &b_of_x, &r).unwrap();
@@ -368,8 +430,6 @@ fn prove(
     Proof {
         agg_pk: agg_pk.clone(),
         agg_weight: total_active_weight,
-
-        r,
         
         parsum_of_r_div_ω: psw_of_x.evaluate(&r_div_ω),
         opening_proof_r_div_ω: KZG::compute_opening_proof(&params, &psw_of_x, &r_div_ω).unwrap(),
@@ -384,12 +444,12 @@ fn prove(
         
         opening_proof_r: merged_proof.into(),
 
-        parsum_of_tau_com: KZG::commit_g1(&params, &psw_of_x).unwrap(),
-        b_of_tau_com: KZG::commit_g1(&params, &b_of_x).unwrap(),
-        q1_of_tau_com: KZG::commit_g1(&params, &psw_wff_q_of_x).unwrap(),
-        q3_of_tau_com: KZG::commit_g1(&params, &psw_check_q_of_x).unwrap(),
-        q2_of_tau_com: KZG::commit_g1(&params, &b_wff_q_of_x).unwrap(),
-        q4_of_tau_com: KZG::commit_g1(&params, &b_check_q_of_x).unwrap(),
+        parsum_of_tau_com: parsum_of_tau_com,
+        b_of_tau_com: b_of_tau_com,
+        q1_of_tau_com: q1_of_tau_com,
+        q3_of_tau_com: q3_of_tau_com,
+        q2_of_tau_com: q2_of_tau_com,
+        q4_of_tau_com: q4_of_tau_com,
 
         qz_of_tau_com: qz_com,
         qx_of_tau_com: qx_com,
@@ -411,7 +471,7 @@ fn verify_opening(
     assert_eq!(lhs, rhs);
 }
 
-fn verify_openings(vp: &VerificationKey, π: &Proof) {
+fn verify_openings(vp: &VerificationKey, π: &Proof, r: F) {
     //adjust the w_of_x_com
     let adjustment = F::from(0) - π.agg_weight;
     let adjustment_com = vp.l_n_minus_1_of_tau_com.mul(adjustment);
@@ -426,24 +486,24 @@ fn verify_openings(vp: &VerificationKey, π: &Proof) {
     let b_check_q_of_r_argument = π.q4_of_tau_com - vp.g_0.clone().mul(π.q4_of_r).into_affine();
 
     let merged_argument: G1 = (psw_of_r_argument
-        + w_of_r_argument.mul(π.r.pow([1]))
-        + b_of_r_argument.mul(π.r.pow([2]))
-        + psw_wff_q_of_r_argument.mul(π.r.pow([3]))
-        + psw_check_q_of_r_argument.mul(π.r.pow([4]))
-        + b_wff_q_of_r_argument.mul(π.r.pow([5]))
-        + b_check_q_of_r_argument.mul(π.r.pow([6]))).into_affine();
+        + w_of_r_argument.mul(r.pow([1]))
+        + b_of_r_argument.mul(r.pow([2]))
+        + psw_wff_q_of_r_argument.mul(r.pow([3]))
+        + psw_check_q_of_r_argument.mul(r.pow([4]))
+        + b_wff_q_of_r_argument.mul(r.pow([5]))
+        + b_check_q_of_r_argument.mul(r.pow([6]))).into_affine();
 
     let lhs = <Curve as Pairing>::pairing(
         merged_argument, 
         vp.h_0);
     let rhs = <Curve as Pairing>::pairing(
         π.opening_proof_r, 
-        vp.h_1 - vp.h_0.clone().mul(π.r).into_affine());
+        vp.h_1 - vp.h_0.clone().mul(r).into_affine());
     assert_eq!(lhs, rhs);
 
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
-    let r_div_ω: F = π.r / ω;
+    let r_div_ω: F = r / ω;
     verify_opening(vp, 
         &π.parsum_of_tau_com, 
         &r_div_ω, 
@@ -456,17 +516,32 @@ fn verify(vp: &VerificationKey, π: &Proof) {
     let domain = Radix2EvaluationDomain::<F>::new(vp.n as usize).unwrap();
     let ω: F = domain.group_gen;
 
+    //RO(SK, W, B, ParSum, Qx, Qz, Qx(τ ) · τ, Q1, Q2, Q3, Q4)
+    let r = random_oracle(
+        vp.sk_of_tau_com, 
+        vp.w_of_tau_com,
+        π.b_of_tau_com,
+        π.parsum_of_tau_com,
+        π.qx_of_tau_com,
+        π.qz_of_tau_com,
+        π.qx_of_tau_mul_tau_com,
+        π.q1_of_tau_com,
+        π.q2_of_tau_com,
+        π.q3_of_tau_com,
+        π.q4_of_tau_com
+    );
+
     // verify the polynomial openings at r and r / ω
-    verify_openings(vp, π);
+    verify_openings(vp, π, r);
 
     let n: u64 = vp.n as u64;
     // this takes logarithmic computation, but concretely efficient
-    let vanishing_of_r: F = π.r.pow([n]) - F::from(1);
+    let vanishing_of_r: F = r.pow([n]) - F::from(1);
 
     // compute L_i(r) using the relation L_i(x) = Z_V(x) / ( Z_V'(x) (x - ω^i) )
     // where Z_V'(x)^-1 = x / N for N = |V|.
     let ω_pow_n_minus_1 = ω.pow([n-1]);
-    let l_n_minus_1_of_r = (ω_pow_n_minus_1 / F::from(n)) * (vanishing_of_r / (π.r - ω_pow_n_minus_1));
+    let l_n_minus_1_of_r = (ω_pow_n_minus_1 / F::from(n)) * (vanishing_of_r / (r - ω_pow_n_minus_1));
 
     //assert polynomial identity B(x) SK(x) = ask + Q_z(x) Z(x) + Q_x(x) x
     let lhs = <Curve as Pairing>::pairing(&π.b_of_tau_com, &vp.sk_of_tau_com);
