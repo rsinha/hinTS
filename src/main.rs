@@ -1,4 +1,4 @@
-use std::time::{Instant};
+use std::time::Instant;
 
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
@@ -13,9 +13,9 @@ use ark_poly::{
 };
 use ark_std::rand::Rng;
 use ark_std::{UniformRand, test_rng, ops::*};
-use ark_bls12_377::{Bls12_377};
+use ark_bls12_377::Bls12_377;
 use ark_ec::{pairing::Pairing, CurveGroup};
-use ark_ec::{VariableBaseMSM};
+use ark_ec::VariableBaseMSM;
 
 use kzg::*;
 
