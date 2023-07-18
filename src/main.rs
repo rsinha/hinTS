@@ -140,10 +140,6 @@ struct VerificationKey {
     tau_com: G2
 }
 
-struct Cache {
-    lagrange_polynomials: Vec<DensePolynomial<F>>
-}
-
 fn sample_weights(n: usize) -> Vec<F> {
     let mut rng = &mut test_rng();
     (0..n).map(|_| F::from(u64::rand(&mut rng))).collect()
@@ -161,21 +157,9 @@ fn sample_bitmap(n: usize, probability: f64) -> Vec<F> {
     bitmap
 }
 
-fn prepare_cache(n: usize) -> Cache {
-    let mut lagrange_polynomials = vec![];
-    for i in 0..n {
-        let l_i_of_x = utils::lagrange_poly(n, i);
-        lagrange_polynomials.push(l_i_of_x);
-    }
-    Cache { lagrange_polynomials }
-} 
-
 fn main() {
     let n = 32;
     println!("n = {}", n);
-
-    //contains commonly used objects such as lagrange polynomials
-    let cache = prepare_cache(n);
 
     // -------------- sample one-time SRS ---------------
     //run KZG setup
@@ -197,7 +181,7 @@ fn main() {
     let bitmap = sample_bitmap(n - 1, 0.9);
 
     let start = Instant::now();
-    let π = prove(&params, &ak, &vk, &cache, &bitmap);
+    let π = prove(&params, &ak, &vk, &bitmap);
     let duration = start.elapsed();
     println!("Time elapsed in prover is: {:?}", duration);
     
@@ -239,7 +223,7 @@ fn setup(
             let idx = i.clone();
             let n = n.clone();
             let sk = sk[idx];
-            let thread_i = s.spawn(move |_| party_i_setup_material(&params, n, idx, &sk));
+            let thread_i = s.spawn(move |_| hint_gen(&params, n, idx, &sk));
             threads.push(thread_i);
         }
 
@@ -333,7 +317,6 @@ fn prove(
     params: &UniversalParams<Curve>,
     ak: &AggregationKey,
     vk: &VerificationKey,
-    cache: &Cache,
     bitmap: &Vec<F>) -> Proof {
     // compute the nth root of unity
     let n = ak.n;
@@ -386,7 +369,7 @@ fn prove(
     let qz_com = filter_and_add(&params, &ak.qz_terms, &bitmap);
     let qx_com = filter_and_add(&params, &ak.qx_terms, &bitmap);
     let qx_mul_tau_com = filter_and_add(&params, &ak.qx_mul_tau_terms, &bitmap);
-    let agg_pk = compute_apk(&ak, &bitmap, &cache);
+    let agg_pk = compute_apk(&ak, &bitmap);
 
     let parsum_of_tau_com = KZG::commit_g1(&params, &psw_of_x).unwrap();
     let b_of_tau_com = KZG::commit_g1(&params, &b_of_x).unwrap();
@@ -584,14 +567,14 @@ fn verify(vp: &VerificationKey, π: &Proof) {
 
 fn compute_apk(
     pp: &AggregationKey, 
-    bitmap: &Vec<F>,
-    cache: &Cache) -> G1 {
+    bitmap: &Vec<F>) -> G1 {
     let n = bitmap.len();
     let mut exponents: Vec<F> = vec![];
+    let n_inv = F::from(1) / F::from(n as u64);
     for i in 0..n {
-        //let l_i_of_x = utils::lagrange_poly(n, i);
-        let l_i_of_x = cache.lagrange_polynomials[i].clone();
-        let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+        //let l_i_of_x = cache.lagrange_polynomials[i].clone();
+        //let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+        let l_i_of_0 = n_inv;
         let active = bitmap[i] == F::from(1);
         exponents.push(if active { l_i_of_0 } else { F::from(0) });
     }
@@ -680,7 +663,7 @@ fn compute_psw_poly(weights: &Vec<F>, bitmap: &Vec<F>) -> DensePolynomial<F> {
     eval_form.interpolate()    
 }
 
-fn party_i_setup_material(
+fn hint_gen(
     params: &UniversalParams<Curve>,
     n: usize, 
     i: usize, 
