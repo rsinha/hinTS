@@ -26,6 +26,21 @@ pub fn compute_vanishing_poly(n: usize) -> DensePolynomial<F> {
     DensePolynomial { coeffs }
 }
 
+/// interpolate polynomial which evaluates to points in v
+/// the domain is the powers of n-th root of unity, where n is size of v
+/// assumes n is a power of 2
+pub fn interpolate_poly_over_mult_subgroup(v: &Vec<F>) -> DensePolynomial<F> {
+    let n = v.len();
+    let mut evals = vec![];
+    for i in 0..n {
+        evals.push(v[i]);
+    }
+
+    let domain = Radix2EvaluationDomain::<F>::new(n).unwrap();
+    let eval_form = Evaluations::from_vec_and_domain(evals, domain);
+    eval_form.interpolate()
+}
+
 // 1 at omega^i and 0 elsewhere on domain {omega^i}_{i \in [n]}
 pub fn lagrange_poly(n: usize, i: usize) -> DensePolynomial<F> {
     //todo: check n is a power of 2

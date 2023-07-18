@@ -1,9 +1,9 @@
 use std::time::Instant;
 
-use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
-use ark_ff::{Field, biginteger::BigInteger256};
 
+use ark_serialize::CanonicalSerialize;
+use ark_ff::{Field, biginteger::BigInteger256};
 use ark_poly::{
     Polynomial,
     univariate::DensePolynomial, 
@@ -137,7 +137,7 @@ struct VerificationKey {
     /// commitment to the vanishing polynomial Z(x) = x^n - 1
     z_of_tau_com: G2,
     /// commitment to the f(x) = x, which equals [\tau]_2
-    tau_com: G2 //commentment to f(x) = x
+    tau_com: G2
 }
 
 struct Cache {
@@ -222,7 +222,7 @@ fn setup(
     sk.push(F::from(0));
     weights.push(F::from(0));
 
-    let w_of_x = compute_poly(&weights);
+    let w_of_x = utils::interpolate_poly_over_mult_subgroup(&weights);
     let w_of_x_com = KZG::commit_g1(&params, &w_of_x).unwrap();
 
     //allocate space to collect setup material from all n-1 parties
@@ -360,8 +360,8 @@ fn prove(
     //compute all the polynomials we will need in the prover
     let z_of_x = utils::compute_vanishing_poly(n); //returns Z(X) = X^n - 1
     let l_n_minus_1_of_x = utils::lagrange_poly(n, n-1);
-    let w_of_x = compute_poly(&weights);
-    let b_of_x = compute_poly(&bitmap);
+    let w_of_x = utils::interpolate_poly_over_mult_subgroup(&weights);
+    let b_of_x = utils::interpolate_poly_over_mult_subgroup(&bitmap);
     let psw_of_x = compute_psw_poly(&weights, &bitmap);
     let psw_of_x_div_ω = utils::poly_domain_mult_ω(&psw_of_x, &ω_inv);
 
@@ -471,7 +471,7 @@ fn verify_opening(
     assert_eq!(lhs, rhs);
 }
 
-fn verify_openings(vp: &VerificationKey, π: &Proof, r: F) {
+fn verify_openings_in_proof(vp: &VerificationKey, π: &Proof, r: F) {
     //adjust the w_of_x_com
     let adjustment = F::from(0) - π.agg_weight;
     let adjustment_com = vp.l_n_minus_1_of_tau_com.mul(adjustment);
@@ -532,7 +532,7 @@ fn verify(vp: &VerificationKey, π: &Proof) {
     );
 
     // verify the polynomial openings at r and r / ω
-    verify_openings(vp, π, r);
+    verify_openings_in_proof(vp, π, r);
 
     let n: u64 = vp.n as u64;
     // this takes logarithmic computation, but concretely efficient
@@ -663,18 +663,6 @@ fn sample_secret_keys(num_parties: usize) -> Vec<F> {
         keys.push(F::rand(&mut rng));
     }
     keys
-}
-
-fn compute_poly(v: &Vec<F>) -> DensePolynomial<F> {
-    let n = v.len();
-    let mut evals = vec![];
-    for i in 0..n {
-        evals.push(v[i]);
-    }
-
-    let domain = Radix2EvaluationDomain::<F>::new(n).unwrap();
-    let eval_form = Evaluations::from_vec_and_domain(evals, domain);
-    eval_form.interpolate()
 }
 
 fn compute_psw_poly(weights: &Vec<F>, bitmap: &Vec<F>) -> DensePolynomial<F> {
@@ -879,10 +867,10 @@ mod tests {
         let domain = Radix2EvaluationDomain::<F>::new(n as usize).unwrap();
         let ω: F = domain.group_gen;
 
-        let w_of_x = compute_poly(&weights);
+        let w_of_x = utils::interpolate_poly_over_mult_subgroup(&weights);
         let w_of_ωx = utils::poly_domain_mult_ω(&w_of_x, &ω);
 
-        let b_of_x = compute_poly(&bitmap);
+        let b_of_x = utils::interpolate_poly_over_mult_subgroup(&bitmap);
         let b_of_ωx = utils::poly_domain_mult_ω(&b_of_x, &ω);
 
         let psw_of_x = compute_psw_poly(&weights, &bitmap);
@@ -948,9 +936,8 @@ mod tests {
         secret_keys.push(F::from(0));
 
         let agg_sk = aggregate_sk(&secret_keys, &bitmap);
-        println!("agg_sk = {:?}", agg_sk);
-        let sk_of_x = compute_poly(&secret_keys);
-        let b_of_x = compute_poly(&bitmap);
+        let sk_of_x = utils::interpolate_poly_over_mult_subgroup(&secret_keys);
+        let b_of_x = utils::interpolate_poly_over_mult_subgroup(&bitmap);
         let q1_of_x = compute_pssk_q1_poly(&secret_keys, &bitmap);
         let q2_of_x = compute_pssk_q2_poly(&secret_keys, &bitmap);
 
