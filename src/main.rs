@@ -231,6 +231,9 @@ fn setup(
     }).unwrap();
 
     for hint in all_parties_setup {
+        //verify hint
+        verify_hint(params, &hint);
+        //extract necessary items for pre-processing
         qz_contributions[hint.i] = hint.qz_i_terms.clone();
         qx_contributions[hint.i] = hint.qx_i_term.clone();
         qx_mul_tau_contributions[hint.i] = hint.qx_i_term_mul_tau.clone();
@@ -728,6 +731,63 @@ fn hint_gen(
     }
 }
 
+fn verify_hint(params: &UniversalParams<Curve>, hint: &Hint) {
+    let i = hint.i;
+    let n = hint.qz_i_terms.len();
+
+    //e([sk_i L_i(τ)]1, [1]2) = e([sk_i]1, [L_i(τ)]2)
+    let l_i_of_x = utils::lagrange_poly(n, i);
+    let z_of_x = utils::compute_vanishing_poly(n);
+
+    let l_i_of_tau_com = KZG::commit_g2(&params, &l_i_of_x).expect("commitment failed");
+    let lhs = <Curve as Pairing>::pairing(hint.sk_i_l_i_of_tau_com_1, params.powers_of_h[0]);
+    let rhs = <Curve as Pairing>::pairing(hint.pk_i, l_i_of_tau_com);
+    assert_eq!(lhs, rhs);
+
+    for j in 0..n {
+        let num: DensePolynomial<F>;
+        if i == j {
+            num = l_i_of_x.clone().mul(&l_i_of_x).sub(&l_i_of_x);
+        } else { //cross-terms
+            let l_j_of_x = utils::lagrange_poly(n, j);
+            num = l_j_of_x.mul(&l_i_of_x);
+        }
+        let f = num.div(&z_of_x);
+
+        //f = li^2 - l_i / z or li lj / z
+        let f_com = KZG::commit_g2(&params, &f).expect("commitment failed");
+        
+        let lhs = <Curve as Pairing>::pairing(hint.qz_i_terms[j], params.powers_of_h[0]);
+        let rhs = <Curve as Pairing>::pairing(hint.pk_i, f_com);
+        assert_eq!(lhs, rhs);
+    }
+
+    let x_monomial = utils::compute_x_monomial();
+    let l_i_of_0 = l_i_of_x.evaluate(&F::from(0));
+    let l_i_of_0_poly = utils::compute_constant_poly(&l_i_of_0);
+
+    //numerator is l_i(x) - l_i(0)
+    let num = l_i_of_x.sub(&l_i_of_0_poly);
+    //denominator is x
+    let den = x_monomial.clone();
+
+    //qx_term = (l_i(x) - l_i(0)) / x
+    let qx_term = &num.div(&den);
+    //qx_term_com = [ sk_i * (l_i(τ) - l_i(0)) / τ ]_1
+    let qx_term_com = KZG::commit_g2(&params, &qx_term).expect("commitment failed");
+    let lhs = <Curve as Pairing>::pairing(hint.qx_i_term, params.powers_of_h[0]);
+    let rhs = <Curve as Pairing>::pairing(hint.pk_i, qx_term_com);
+    assert_eq!(lhs, rhs);
+
+    //qx_term_mul_tau = (l_i(x) - l_i(0))
+    let qx_term_mul_tau = &num;
+    //qx_term_mul_tau_com = [ (l_i(τ) - l_i(0)) ]_1
+    let qx_term_mul_tau_com = KZG::commit_g2(&params, &qx_term_mul_tau).expect("commitment failed");
+    let lhs = <Curve as Pairing>::pairing(hint.qx_i_term_mul_tau, params.powers_of_h[0]);
+    let rhs = <Curve as Pairing>::pairing(hint.pk_i, qx_term_mul_tau_com);
+    assert_eq!(lhs, rhs);
+
+}
 
 #[cfg(test)]
 mod tests {
